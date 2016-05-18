@@ -7,6 +7,37 @@ import cats.data.Xor, Xor.{Left, Right}
 import cats.arrow.NaturalTransformation
 
 object Free {
+
+  private sealed trait Fun[A, B] {
+    def andThen[C](f: B => C): Fun[A, C] = this andThen Fun.Wrap(f)
+    def andThen[C](f: Fun[B, C]): Fun[A, C] = Fun.AndThen(this, f)
+    def apply(a: A): B = Fun.Eval(a, this).eval
+  }
+
+  private object Fun {
+    final case class Wrap[A, B](f: A => B) extends Fun[A, B]
+    final case class AndThen[A, B, C](f: Fun[A, B], g: Fun[B, C]) extends Fun[A, C]
+
+    sealed trait Eval[B] {
+      type A
+      val a: A
+      val fun: Fun[A, B]
+
+      @tailrec def eval: B = fun match {
+        case Wrap(f) => f(a)
+        case AndThen(Wrap(f), g) => Eval(f(a), g).eval
+        case AndThen(AndThen(f, g), h) => Eval(a, f andThen (g andThen h)).eval
+      }
+    }
+    object Eval {
+      def apply[A0, B](a0: A0, f: Fun[A0, B]): Eval[B] = new Eval[B] {
+        type A = A0
+        val a = a0
+        val fun = f
+      }
+    }
+  }
+
   /**
    * Return from the computation with the given value.
    */
@@ -16,7 +47,7 @@ object Free {
   private final case class Suspend[S[_], A](a: S[A]) extends Free[S, A]
 
   /** Call a subroutine and continue with the given function. */
-  private final case class Gosub[S[_], B, C](c: Free[S, C], f: C => Free[S, B]) extends Free[S, B]
+  private final case class Gosub[S[_], B, C](c: S[C] Xor C, f: Fun[C, Free[S, B]]) extends Free[S, B]
 
   /**
    * Suspend a value within a functor lifting it to a Free.
@@ -64,8 +95,11 @@ sealed abstract class Free[S[_], A] extends Product with Serializable {
    * Bind the given continuation to the result of this computation.
    * All left-associated binds are reassociated to the right.
    */
-  final def flatMap[B](f: A => Free[S, B]): Free[S, B] =
-    Gosub(this, f)
+  final def flatMap[B](f: A => Free[S, B]): Free[S, B] = this match {
+    case Pure(a) => Gosub(Xor.right(a), Fun.Wrap(f))
+    case Suspend(sa) => Gosub(Xor.left(sa), Fun.Wrap(f))
+    case Gosub(c, g) => Gosub(c, g.andThen(_.flatMap(f)))
+  }
 
   /**
    * Catamorphism. Run the first given function if Pure, otherwise,
@@ -74,14 +108,6 @@ sealed abstract class Free[S[_], A] extends Product with Serializable {
   final def fold[B](r: A => B, s: S[Free[S, A]] => B)(implicit S: Functor[S]): B =
     resume.fold(s, r)
 
-  /** Takes one evaluation step in the Free monad, re-associating left-nested binds in the process. */
-  @tailrec
-  final def step: Free[S, A] = this match {
-    case Gosub(Gosub(c, f), g) => c.flatMap(cc => f(cc).flatMap(g)).step
-    case Gosub(Pure(a), f) => f(a).step
-    case x => x
-  }
-
   /**
    * Evaluate a single layer of the free monad.
    */
@@ -89,12 +115,8 @@ sealed abstract class Free[S[_], A] extends Product with Serializable {
   final def resume(implicit S: Functor[S]): S[Free[S, A]] Xor A = this match {
     case Pure(a) => Right(a)
     case Suspend(t) => Left(S.map(t)(Pure(_)))
-    case Gosub(c, f) =>
-      c match {
-        case Pure(a) => f(a).resume
-        case Suspend(t) => Left(S.map(t)(f))
-        case Gosub(d, g) => d.flatMap(dd => g(dd).flatMap(f)).resume
-      }
+    case Gosub(Xor.Left(sc), f) => Left(S.map(sc)(f(_)))
+    case Gosub(Xor.Right(c), f) => f(c).resume
   }
 
   /**
@@ -130,24 +152,35 @@ sealed abstract class Free[S[_], A] extends Product with Serializable {
    * Run to completion, mapping the suspension with the given transformation at each step and
    * accumulating into the monad `M`.
    */
+  @tailrec
   final def foldMap[M[_]](f: NaturalTransformation[S,M])(implicit M: Monad[M]): M[A] =
-    step match {
+    this match {
       case Pure(a) => M.pure(a)
-      case Suspend(s) => f(s)
-      case Gosub(c, g) => M.flatMap(c.foldMap(f))(cc => g(cc).foldMap(f))
+      case Suspend(sa) => f(sa)
+      case Gosub(Xor.Left(sc), g) => M.flatMap(f(sc))(c => g(c).foldMap0(f))
+      case Gosub(Xor.Right(c), g) => g(c).foldMap(f)
     }
+
+  /** Alias for foldMap to be used inside foldMap in a non-tail position. */
+  private final def foldMap0[M[_]](f: NaturalTransformation[S,M])(implicit M: Monad[M]): M[A] = foldMap(f)
 
   /**
    * Compile your Free into another language by changing the suspension functor
    * using the given natural transformation.
    * Be careful if your natural transformation is effectful, effects are applied by mapSuspension.
    */
+  @tailrec
   final def mapSuspension[T[_]](f: NaturalTransformation[S,T]): Free[T, A] =
-    foldMap[Free[T, ?]] {
-      new NaturalTransformation[S, Free[T, ?]] {
-        def apply[B](fa: S[B]): Free[T, B] = Suspend(f(fa))
-      }
-    }(Free.freeMonad)
+    this match {
+      case Pure(a) => Pure(a)
+      case Suspend(sa) => Suspend(f(sa))
+      case Gosub(Xor.Left(sc), g) => Gosub(Xor.left(f(sc)), g.andThen(_.mapSuspension0(f)))
+      case Gosub(Xor.Right(c), g) => g(c).mapSuspension(f)
+    }
+
+  /** Alias for mapSuspension to be used inside mapSuspension in a non-tail position. */
+  final def mapSuspension0[T[_]](f: NaturalTransformation[S,T]): Free[T, A] =
+    mapSuspension(f)
 
   final def compile[T[_]](f: NaturalTransformation[S,T]): Free[T, A] = mapSuspension(f)
 

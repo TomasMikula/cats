@@ -43,6 +43,46 @@ class FreeTests extends CatsSuite {
     }
   }
 
+  test("free with mapSuspension should be stack safe") {
+    trait FTestApi[A]
+    case class TB(i: Int) extends FTestApi[Int]
+
+    trait FTestApi2[A]
+    case class TB2(i: Int) extends FTestApi2[Int]
+
+    def mapper: FTestApi ~> FTestApi2 = new (FTestApi ~> FTestApi2) {
+      def apply[A](fa: FTestApi[A]): FTestApi2[A] = fa match {
+        case TB(i) => TB2(i)
+      }
+    }
+
+    def mapper2: FTestApi2 ~> FTestApi = new (FTestApi2 ~> FTestApi) {
+      def apply[A](fa: FTestApi2[A]): FTestApi[A] = fa match {
+        case TB2(i) => TB(i)
+      }
+    }
+
+    type FTest[A] = Free[FTestApi, A]
+    type FTest2[A] = Free[FTestApi2, A]
+
+    def tb(i: Int): FTest[Int] = Free.liftF(TB(i))
+
+
+    def a(i: Int): FTest2[Int] = for {
+      j <- tb(i).mapSuspension(mapper)
+      z <- (if (j<10000) a(j+1).mapSuspension(mapper2) else Free.pure[FTestApi, Int](j)).mapSuspension(mapper)
+    } yield z
+
+    val runner: FTestApi2 ~> Trampoline = new (FTestApi2 ~> Trampoline) {
+      def apply[A](fa: FTestApi2[A]): Trampoline[A] = fa match {
+        case TB2(i) => Trampoline.done(i)
+      }
+    }
+
+    assert(10000 == a(0).foldMap(runner).run)
+  }
+  
+
   ignore("foldMap is stack safe") {
     trait FTestApi[A]
     case class TB(i: Int) extends FTestApi[Int]
