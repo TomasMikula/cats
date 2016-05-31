@@ -21,6 +21,11 @@ class StateTTests extends CatsSuite {
     x.runS(0).value should === (100001)
   }
 
+  test("10000 maps is stack-safe"){
+    val x = (0 until 10000).foldLeft(StateT.pure[Id, Int, Int](0))((s, i) => s.map(_ + 1))
+    x.runA(0) should === (10000)
+  }
+
   test("State.pure and StateT.pure are consistent"){
     forAll { (s: String, i: Int) =>
       val state: State[String, Int] = State.pure(i)
