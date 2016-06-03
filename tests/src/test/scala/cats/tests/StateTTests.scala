@@ -3,7 +3,7 @@ package tests
 
 import cats.kernel.std.tuple._
 import cats.laws.discipline.{CartesianTests, MonadRecTests, MonadStateTests, SerializableTests}
-import cats.data.{State, StateT}
+import cats.data.{State, StateT, Xor}
 import cats.laws.discipline.eq._
 import cats.laws.discipline.arbitrary._
 import org.scalacheck.Arbitrary
@@ -21,9 +21,21 @@ class StateTTests extends CatsSuite {
     x.runS(0).value should === (100001)
   }
 
+  test("iterative transformF on trampolined StateT is stack-safe"){
+    val st = (0 to 10000).foldLeft(State[Int, Int](s => (s, s)))((s, _) => s.transformF(x => x))
+    st.runA(5).value should === (5)
+  }
+
   test("10000 maps is stack-safe"){
     val x = (0 until 10000).foldLeft(StateT.pure[Id, Int, Int](0))((s, i) => s.map(_ + 1))
     x.runA(0) should === (10000)
+  }
+
+  test("tailRecM is stack-safe, even when the given function returns an ugly StateT"){
+    def go(n: Int): StateT[Id, Int, Int Xor Int] =
+      (1 to n).foldLeft(StateT[Id, Int, Int](s => (s, 0)))((s, i) => s.flatMap(_ => StateT[Id, Int, Int](t => (t, i)))).map(Xor.right)
+
+    StateT.catsDataMonadRecForStateT[Id, Int].tailRecM(10000)(go).runA(0) should === (10000)
   }
 
   test("State.pure and StateT.pure are consistent"){
