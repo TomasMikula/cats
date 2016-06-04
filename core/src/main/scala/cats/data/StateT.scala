@@ -213,7 +213,7 @@ private[data] sealed trait StateTMonadRec[F[_], S] extends MonadRec[StateT[F, S,
 private[data] sealed abstract class Fun[A, B] {
   import Fun._
 
-  def apply(a: A): B = Evaluator(a, this).eval
+  def apply(a: A): B = eval(a, this.asInstanceOf[Fun[Any, B]])
   def andThen[C](g: Fun[B, C]): Fun[A, C] = AndThen(this, g)
   def andThen[C](g: B => C): Fun[A, C] = andThen(Wrap(g))
 }
@@ -224,24 +224,10 @@ private[data] object Fun {
   final case class Wrap[A, B](f: A => B) extends Fun[A, B]
   final case class AndThen[A, B, C](f: Fun[A, B], g: Fun[B, C]) extends Fun[A, C]
 
-  private abstract class Evaluator[B] {
-    type A
-    val a: A
-    val fun: Fun[A, B]
-
-    @annotation.tailrec
-    final def eval: B = fun match {
-      case Wrap(f) => f(a)
-      case AndThen(Wrap(f), g) => Evaluator(f(a), g).eval
-      case AndThen(AndThen(f, g), h) => Evaluator(a, f andThen (g andThen h)).eval
-    }
-  }
-
-  private object Evaluator {
-    def apply[A0, B](a0: A0, f: Fun[A0, B]): Evaluator[B] = new Evaluator[B] {
-      type A = A0
-      val a = a0
-      val fun = f
-    }
+  @annotation.tailrec
+  private final def eval[B](a: Any, fun: Fun[Any, B]): B = fun match {
+    case Wrap(f) => f(a)
+    case AndThen(Wrap(f), g) => eval(f(a), g)
+    case AndThen(AndThen(f, g), h) => eval(a, f andThen (g andThen h))
   }
 }
